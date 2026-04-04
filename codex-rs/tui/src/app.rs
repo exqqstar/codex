@@ -4053,88 +4053,99 @@ impl App {
                 .await?
                 {
                     SessionSelection::Resume(target_session) => {
-                        let current_cwd = self.config.cwd.to_path_buf();
-                        let resume_cwd = if self.remote_app_server_url.is_some() {
-                            current_cwd.clone()
-                        } else {
-                            match crate::resolve_cwd_for_resume_or_fork(
-                                tui,
-                                &self.config,
-                                &current_cwd,
-                                target_session.thread_id,
-                                target_session.path.as_deref(),
-                                CwdPromptAction::Resume,
-                                /*allow_prompt*/ true,
-                            )
-                            .await?
-                            {
-                                crate::ResolveCwdOutcome::Continue(Some(cwd)) => cwd,
-                                crate::ResolveCwdOutcome::Continue(None) => current_cwd.clone(),
-                                crate::ResolveCwdOutcome::Exit => {
-                                    return Ok(AppRunControl::Exit(ExitReason::UserRequested));
-                                }
-                            }
-                        };
-                        let mut resume_config = match self
-                            .rebuild_config_for_resume_or_fallback(&current_cwd, resume_cwd)
-                            .await
+                        // If the user selected the already-active thread,
+                        // treat as a no-op: avoid shutdown_current_thread →
+                        // unsubscribe → ThreadClosed → immediate-exit, and
+                        // the unnecessary ChatWidget destroy-and-rebuild that
+                        // would discard local UI state (composer drafts,
+                        // pending steers, queued messages, etc.).
+                        if self.chat_widget.thread_id().as_ref() != Some(&target_session.thread_id)
                         {
-                            Ok(cfg) => cfg,
-                            Err(err) => {
-                                self.chat_widget.add_error_message(format!(
-                                    "Failed to rebuild configuration for resume: {err}"
-                                ));
-                                return Ok(AppRunControl::Continue);
-                            }
-                        };
-                        self.apply_runtime_policy_overrides(&mut resume_config);
-                        let summary = session_summary(
-                            self.chat_widget.token_usage(),
-                            self.chat_widget.thread_id(),
-                            self.chat_widget.thread_name(),
-                        );
-                        match app_server
-                            .resume_thread(resume_config.clone(), target_session.thread_id)
-                            .await
-                        {
-                            Ok(resumed) => {
-                                self.shutdown_current_thread(app_server).await;
-                                self.config = resume_config;
-                                tui.set_notification_method(self.config.tui_notification_method);
-                                self.file_search
-                                    .update_search_dir(self.config.cwd.to_path_buf());
-                                match self
-                                    .replace_chat_widget_with_app_server_thread(
-                                        tui, app_server, resumed,
-                                    )
-                                    .await
+                            let current_cwd = self.config.cwd.to_path_buf();
+                            let resume_cwd = if self.remote_app_server_url.is_some() {
+                                current_cwd.clone()
+                            } else {
+                                match crate::resolve_cwd_for_resume_or_fork(
+                                    tui,
+                                    &self.config,
+                                    &current_cwd,
+                                    target_session.thread_id,
+                                    target_session.path.as_deref(),
+                                    CwdPromptAction::Resume,
+                                    /*allow_prompt*/ true,
+                                )
+                                .await?
                                 {
-                                    Ok(()) => {
-                                        if let Some(summary) = summary {
-                                            let mut lines: Vec<Line<'static>> =
-                                                vec![summary.usage_line.clone().into()];
-                                            if let Some(command) = summary.resume_command {
-                                                let spans = vec![
-                                                    "To continue this session, run ".into(),
-                                                    command.cyan(),
-                                                ];
-                                                lines.push(spans.into());
-                                            }
-                                            self.chat_widget.add_plain_history_lines(lines);
-                                        }
+                                    crate::ResolveCwdOutcome::Continue(Some(cwd)) => cwd,
+                                    crate::ResolveCwdOutcome::Continue(None) => current_cwd.clone(),
+                                    crate::ResolveCwdOutcome::Exit => {
+                                        return Ok(AppRunControl::Exit(ExitReason::UserRequested));
                                     }
-                                    Err(err) => {
-                                        self.chat_widget.add_error_message(format!(
+                                }
+                            };
+                            let mut resume_config = match self
+                                .rebuild_config_for_resume_or_fallback(&current_cwd, resume_cwd)
+                                .await
+                            {
+                                Ok(cfg) => cfg,
+                                Err(err) => {
+                                    self.chat_widget.add_error_message(format!(
+                                        "Failed to rebuild configuration for resume: {err}"
+                                    ));
+                                    return Ok(AppRunControl::Continue);
+                                }
+                            };
+                            self.apply_runtime_policy_overrides(&mut resume_config);
+                            let summary = session_summary(
+                                self.chat_widget.token_usage(),
+                                self.chat_widget.thread_id(),
+                                self.chat_widget.thread_name(),
+                            );
+                            match app_server
+                                .resume_thread(resume_config.clone(), target_session.thread_id)
+                                .await
+                            {
+                                Ok(resumed) => {
+                                    self.shutdown_current_thread(app_server).await;
+                                    self.config = resume_config;
+                                    tui.set_notification_method(
+                                        self.config.tui_notification_method,
+                                    );
+                                    self.file_search
+                                        .update_search_dir(self.config.cwd.to_path_buf());
+                                    match self
+                                        .replace_chat_widget_with_app_server_thread(
+                                            tui, app_server, resumed,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            if let Some(summary) = summary {
+                                                let mut lines: Vec<Line<'static>> =
+                                                    vec![summary.usage_line.clone().into()];
+                                                if let Some(command) = summary.resume_command {
+                                                    let spans = vec![
+                                                        "To continue this session, run ".into(),
+                                                        command.cyan(),
+                                                    ];
+                                                    lines.push(spans.into());
+                                                }
+                                                self.chat_widget.add_plain_history_lines(lines);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            self.chat_widget.add_error_message(format!(
                                             "Failed to attach to resumed app-server thread: {err}"
                                         ));
+                                        }
                                     }
                                 }
-                            }
-                            Err(err) => {
-                                let path_display = target_session.display_label();
-                                self.chat_widget.add_error_message(format!(
-                                    "Failed to resume session from {path_display}: {err}"
-                                ));
+                                Err(err) => {
+                                    let path_display = target_session.display_label();
+                                    self.chat_widget.add_error_message(format!(
+                                        "Failed to resume session from {path_display}: {err}"
+                                    ));
+                                }
                             }
                         }
                     }
@@ -6215,6 +6226,7 @@ mod tests {
     use crate::multi_agents::AgentPickerThreadEntry;
     use assert_matches::assert_matches;
 
+    use codex_app_server_client::AppServerEvent;
     use codex_app_server_protocol::AdditionalFileSystemPermissions;
     use codex_app_server_protocol::AdditionalNetworkPermissions;
     use codex_app_server_protocol::AdditionalPermissionProfile;
@@ -10753,6 +10765,55 @@ guardian_approval = true
         assert!(
             op_rx.try_recv().is_err(),
             "shutdown should not submit Op::Shutdown"
+        );
+    }
+
+    /// Regression test: calling `shutdown_current_thread` on an app-server
+    /// thread that the chat_widget considers "current" eventually unsubscribes
+    /// the only subscriber, causing the app-server to unload the thread and
+    /// broadcast `ThreadClosed`. The same-thread guard in the `/resume` branch
+    /// prevents that path from running when the selected session is already
+    /// active.
+    #[tokio::test]
+    async fn shutdown_current_thread_emits_thread_closed_and_unloads_active_app_server_thread() {
+        let mut app = make_test_app().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await
+            .expect("start thread");
+        let thread_id = started.session.thread_id;
+        app.chat_widget.handle_thread_session(started.session);
+        assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
+
+        app.shutdown_current_thread(&mut app_server).await;
+
+        let closed_thread_id = time::timeout(time::Duration::from_secs(1), async {
+            loop {
+                match app_server.next_event().await {
+                    Some(AppServerEvent::ServerNotification(ServerNotification::ThreadClosed(
+                        notification,
+                    ))) => break notification.thread_id,
+                    Some(_) => {}
+                    None => panic!("app server disconnected before thread/closed"),
+                }
+            }
+        })
+        .await
+        .expect("thread/closed notification should arrive after shutdown_current_thread");
+
+        assert_eq!(closed_thread_id, thread_id.to_string());
+
+        let read_result = app_server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await;
+        assert!(
+            read_result.is_err(),
+            "thread should have been unloaded after shutdown_current_thread"
         );
     }
 
